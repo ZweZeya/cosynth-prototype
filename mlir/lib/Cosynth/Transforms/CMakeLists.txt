@@ -1,6 +1,7 @@
 add_mlir_library(MLIRCosynthTransforms
   LiftCIRToCosynth.cpp
   LowerCosynthToCIR.cpp
+  QueueOwnershipAnalysis.cpp
   Utils.cpp
   LINK_LIBS PUBLIC
   MLIRCosynth

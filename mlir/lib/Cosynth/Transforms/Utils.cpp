@@ -25,4 +25,28 @@ namespace mlir::cosynth {
         }
         return false;
     }
+
+    SemanticOpKind getSemanticKind(cir::FuncOp funcOp) {
+        if (!funcOp) return SemanticOpKind::Unknown;
+        
+        auto annotations = funcOp.getAnnotationsAttr();
+        if (!annotations) return SemanticOpKind::Unknown;
+        
+        for (auto attr: annotations) {
+            auto annotAttr = mlir::dyn_cast<cir::AnnotationAttr>(attr);
+            if (!annotAttr) return SemanticOpKind::Unknown;
+
+            StringRef name = annotAttr.getName().getValue();
+            if (name == "cosynth_queue_push") {
+                return SemanticOpKind::QueuePush;
+            }
+            if (name == "cosynth_queue_try_pop") {
+                return SemanticOpKind::QueuePop;
+            }
+            if (name == "cosynth_thread_spawn") {
+                return SemanticOpKind::ThreadSpawn;
+            }
+        }
+        return SemanticOpKind::Unknown;
+    }
 }

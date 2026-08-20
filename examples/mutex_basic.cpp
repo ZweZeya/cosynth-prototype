@@ -1,4 +1,4 @@
-#include "concur.hpp"
+#include "shim/mutex.hpp"
 
 void f(concur::mutex &m) {
     m.lock();
