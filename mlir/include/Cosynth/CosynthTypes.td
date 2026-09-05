@@ -1,3 +1,6 @@
+#ifndef COSYNTH_TYPES_TD
+#define COSYNTH_TYPES_TD
+
 include "mlir/IR/AttrTypeBase.td"
 include "Cosynth/CosynthDialect.td"
 
@@ -13,3 +16,11 @@ def Cosynth_MutexType : Cosynth_Type<"Mutex", "mutex"> {
     compiler as first-class IR operations.
   }];
 }
+
+def Cosynth_QueueType : Cosynth_Type<"Queue", "queue"> {
+    let summary = "A CoSynth queue handle";
+    let parameters = (ins "Type":$elementType);
+    let assemblyFormat = "`<` $elementType `>`";
+}
+
+#endif // COSYNTH_TYPES_TD

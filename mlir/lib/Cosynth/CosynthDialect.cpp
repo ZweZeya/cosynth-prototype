@@ -15,8 +15,5 @@ void CosynthDialect::initialize() {
 #include "Cosynth/CosynthOps.cpp.inc"
       >();
 
-  addTypes<
-#define GET_TYPEDEF_LIST
-#include "Cosynth/CosynthTypes.cpp.inc"
-      >();
+  registerTypes();
 }

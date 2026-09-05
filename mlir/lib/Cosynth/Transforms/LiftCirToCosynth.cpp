@@ -19,10 +19,13 @@ struct CirToCosynthConversionTarget : public ConversionTarget {
     CirToCosynthConversionTarget(MLIRContext &ctx) : ConversionTarget(ctx) {
         addLegalDialect<CosynthDialect>();
         addLegalDialect<cir::CIRDialect>();
+        addLegalOp<mlir::UnrealizedConversionCastOp>();
 
         addDynamicallyLegalOp<cir::CallOp>([](cir::CallOp op) {
             return !isCosynthAnnotatedCall(op, "cosynth_mutex_lock") 
-                && !isCosynthAnnotatedCall(op, "cosynth_mutex_unlock");
+                && !isCosynthAnnotatedCall(op, "cosynth_mutex_unlock")
+                && !isCosynthAnnotatedCall(op, "cosynth_queue_push")
+                && !isCosynthAnnotatedCall(op, "cosynth_queue_try_pop");
         });
     }
 };
@@ -92,6 +95,45 @@ struct LiftMutexCallPattern : public OpConversionPattern<cir::CallOp> {
     }
 };
 
+struct LiftQueueCallPattern : public OpConversionPattern<cir::CallOp> {
+    using OpConversionPattern::OpConversionPattern;
+
+    LogicalResult matchAndRewrite(
+        cir::CallOp op,
+        OpAdaptor adaptor,
+        ConversionPatternRewriter &rewriter
+    ) const override {
+        bool isPush = isCosynthAnnotatedCall(op, "cosynth_queue_push");
+        bool isPop = isCosynthAnnotatedCall(op, "cosynth_queue_try_pop");
+
+        if (!isPush && !isPop)
+            return failure();
+
+        Type elementType;
+        if (isPush) {
+            auto valuePtrType = mlir::cast<cir::PointerType>(op.getOperand(1).getType());
+            elementType = valuePtrType.getPointee();
+        } else {
+            auto resultRecordType = mlir::cast<cir::RecordType>(op.getResult().getType());
+            auto objectPtrType = mlir::cast<cir::PointerType>(resultRecordType.getMembers()[0]);
+            elementType = objectPtrType.getPointee();
+        }
+
+        auto queueType = QueueType::get(rewriter.getContext(), elementType);
+        Value queue = mlir::UnrealizedConversionCastOp::create(
+            rewriter, op.getLoc(), queueType, adaptor.getOperands()[0]
+        ).getResult(0);
+
+        if (isPush) {
+            rewriter.replaceOpWithNewOp<QueuePushOp>(op, queue, adaptor.getOperands()[1], IntegerAttr());
+        } else {
+            rewriter.replaceOpWithNewOp<QueuePopOp>(op, op.getResult().getType(), queue, IntegerAttr());
+        }
+
+        return success();
+    }
+};
+
 struct LiftToCosynthPass 
     : public PassWrapper<LiftToCosynthPass, OperationPass<ModuleOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LiftToCosynthPass)
@@ -116,6 +158,7 @@ struct LiftToCosynthPass
         RewritePatternSet patterns(context);
 
         patterns.add<LiftMutexCallPattern>(typeConverter, context);
+        patterns.add<LiftQueueCallPattern>(typeConverter, context);
 
         if (failed(applyPartialConversion(getOperation(), conversionTarget, std::move(patterns)))) {
             signalPassFailure();

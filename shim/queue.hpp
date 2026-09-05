@@ -34,7 +34,18 @@ private:
     }
 
 public:
+    [[clang::annotate("cosynth_queue_construction")]]
     queue() : head(new node), tail(head.get()) {}
+
+    queue(const queue&) = delete;
+    queue& operator=(const queue&) = delete;
+
+    queue(queue&&) = operator delete;
+    queue& operator=(queue&&) = delete;
+
+    ~queue() {
+        
+    }
 
     [[clang::annotate("cosynth_queue_try_pop")]]
     std::shared_ptr<T> try_pop() {

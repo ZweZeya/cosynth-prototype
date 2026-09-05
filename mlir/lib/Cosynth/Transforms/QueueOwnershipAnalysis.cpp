@@ -1,3 +1,4 @@
+#include "Cosynth/CosynthOps.h"
 #include "Cosynth/Transforms/Utils.h"
 
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
@@ -8,7 +9,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/DenseMap.h"
 
 using namespace mlir;
 using namespace mlir::cosynth;
@@ -18,74 +19,36 @@ struct QueueAccessInfo {
     llvm::SmallDenseSet<unsigned, 4> consumers;
 };
 
+struct ThreadInstance {
+    unsigned threadId;
+    Value boundArg;
+};
+
 struct QueueOwnershipAnalysisPass
     : public PassWrapper<QueueOwnershipAnalysisPass, OperationPass<ModuleOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QueueOwnershipAnalysisPass)
 
     unsigned nextThreadId = 0;
+    ModuleOp module;
 
-    llvm::DenseMap<Operation *, llvm::SmallVector<unsigned>> threadContexts;
-    llvm::StringMap<QueueAccessInfo> queueAccesses;
+    llvm::DenseMap<Operation *, llvm::SmallVector<ThreadInstance>> threadContexts;
+    llvm::DenseMap<Operation *, llvm::SmallVector<ThreadInstance>> threadInstanceCache;
+    llvm::DenseMap<Operation *, QueueAccessInfo> queueAccesses;
+    llvm::DenseMap<std::pair<Value, unsigned>, Operation *> rootCache;
 
     StringRef getArgument() const final {
         return "queue-ownership-analysis";
     }
-    
+
     void runOnOperation() override {
-        ModuleOp module = getOperation();
-        
-        processThreadSpawn(module);
-        processQueueOp(module);
+        module = getOperation();
+
+        processThreadSpawn();
+        processQueueOp();
         classifyQueues();
     }
 
-    void processThreadSpawn(ModuleOp& module) {
-        module.walk([&](cir::CallOp callOp) {
-            auto calleeAttr = callOp.getCalleeAttr();
-            if (!calleeAttr) 
-                return;
-
-            auto calleeFunc = 
-                SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
-                    callOp.getOperation(), calleeAttr);
-            if (!calleeFunc)
-                return;
-            
-            SemanticOpKind semanticOp = getSemanticKind(calleeFunc);
-            if (semanticOp != SemanticOpKind::ThreadSpawn)
-                return;
-            
-            for (Value operand: callOp.getOperands()) {
-                auto getGlobalOp = operand.getDefiningOp<cir::GetGlobalOp>();
-                if (!getGlobalOp)
-                    continue;
-
-                auto nameAttr = getGlobalOp->getAttrOfType<FlatSymbolRefAttr>("name");
-                if (!nameAttr)
-                    continue;
-                
-                auto entryFunc = 
-                    SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
-                        callOp.getOperation(), nameAttr);
-                if (!entryFunc)
-                    continue;
-                
-                unsigned threadId = nextThreadId++;
-                threadContexts[entryFunc.getOperation()].push_back(threadId);
-
-                llvm::outs()
-                    << "THREAD T" 
-                    << threadId
-                    << "\n  entry: "
-                    << entryFunc.getSymName()
-                    << "\n";
-
-                break;
-            }
-        });
-    }
-
-    void processQueueOp(ModuleOp& module) {
+    void processThreadSpawn() {
         module.walk([&](cir::CallOp callOp) {
             auto calleeAttr = callOp.getCalleeAttr();
             if (!calleeAttr)
@@ -94,69 +57,198 @@ struct QueueOwnershipAnalysisPass
             auto calleeFunc =
                 SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
                     callOp.getOperation(), calleeAttr);
-            if (!calleeFunc) 
+            if (!calleeFunc)
                 return;
 
             SemanticOpKind semanticOp = getSemanticKind(calleeFunc);
-            if (semanticOp != SemanticOpKind::QueuePush && semanticOp != SemanticOpKind::QueuePop)
+            if (semanticOp != SemanticOpKind::ThreadSpawn)
                 return;
 
-            Value receiver = callOp.getOperand(0);
-            auto getGlobalOp = receiver.getDefiningOp<cir::GetGlobalOp>();
-            if (!getGlobalOp) {
-                llvm::outs()
-                    << "Could not resolve queue instance\n";
-                return;   
-            }
+            if (callOp.getNumOperands() == 0)
+                return;
+
+            auto getGlobalOp = callOp.getOperand(0).getDefiningOp<cir::GetGlobalOp>();
+            if (!getGlobalOp)
+                return;
 
             auto nameAttr = getGlobalOp->getAttrOfType<FlatSymbolRefAttr>("name");
-            if (!nameAttr) 
+            if (!nameAttr)
                 return;
 
-            auto caller = callOp->getParentOfType<cir::FuncOp>();
-            auto threadIt = threadContexts.find(caller.getOperation());
-            if (threadIt == threadContexts.end()) {
-                llvm::outs()
-                    << "Could not resolve thread context for "
-                    << caller.getSymName()
-                    << "\n";
+            auto entryFunc =
+                SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
+                    callOp.getOperation(), nameAttr);
+            if (!entryFunc)
                 return;
-            }
-            
-            StringRef queueName = nameAttr.getValue();
-            QueueAccessInfo &info = queueAccesses[queueName];
-            bool isPush = semanticOp == SemanticOpKind::QueuePush;
-            for (unsigned threadId : threadIt->second) {
-                if (isPush) {
-                    info.producers.insert(threadId);
-                } else {
-                    info.consumers.insert(threadId);
+
+            Value boundArg;
+            if (callOp.getNumOperands() == 2)
+                boundArg = callOp.getOperand(1);
+
+            unsigned threadId = nextThreadId++;
+            threadContexts[entryFunc.getOperation()].push_back({threadId, boundArg});
+
+            llvm::outs()
+                << "THREAD T"
+                << threadId
+                << "\n  entry: "
+                << entryFunc.getSymName()
+                << "\n";
+        });
+    }
+
+    void processQueueOp() {
+        module.walk([&](QueuePushOp pushOp) {
+            recordQueueAccess(pushOp.getOperation(), pushOp.getQueue(), /*isPush=*/true);
+        });
+        module.walk([&](QueuePopOp popOp) {
+            recordQueueAccess(popOp.getOperation(), popOp.getQueue(), /*isPush=*/false);
+        });
+    }
+
+    static cir::FuncOp findEnclosingFunc(Block *block) {
+        Operation *op = block->getParentOp();
+        if (!op)
+            return nullptr;
+        if (auto funcOp = mlir::dyn_cast<cir::FuncOp>(op))
+            return funcOp;
+        return op->getParentOfType<cir::FuncOp>();
+    }
+
+    llvm::SmallVector<ThreadInstance> getThreadInstances(cir::FuncOp func) {
+        if (auto it = threadInstanceCache.find(func.getOperation()); it != threadInstanceCache.end())
+            return it->second;
+
+        threadInstanceCache[func.getOperation()] = {};
+
+        llvm::SmallVector<ThreadInstance> collected;
+        if (auto it = threadContexts.find(func.getOperation()); it != threadContexts.end())
+            collected.append(it->second.begin(), it->second.end());
+
+        if (auto uses = SymbolTable::getSymbolUses(func.getOperation(), module.getOperation())) {
+            for (const SymbolTable::SymbolUse &use : *uses) {
+                auto callOp = mlir::dyn_cast<cir::CallOp>(use.getUser());
+                if (!callOp)
+                    continue;
+
+                auto calleeAttr = callOp.getCalleeAttr();
+                if (!calleeAttr)
+                    continue;
+
+                auto calleeFunc = SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
+                    callOp.getOperation(), calleeAttr);
+                if (calleeFunc != func)
+                    continue;
+
+                auto callerFunc = callOp->getParentOfType<cir::FuncOp>();
+                if (!callerFunc)
+                    continue;
+
+                for (ThreadInstance callerInst : getThreadInstances(callerFunc)) {
+                    Value boundArg = callOp.getNumOperands() >= 1 ? callOp.getOperand(0) : Value();
+                    collected.push_back({callerInst.threadId, boundArg});
                 }
+            }
+        }
+
+        threadInstanceCache[func.getOperation()] = collected;
+        return collected;
+    }
+
+    Operation *resolveQueueRoot(Value v, unsigned threadId) {
+        auto key = std::make_pair(v, threadId);
+        if (auto it = rootCache.find(key); it != rootCache.end())
+            return it->second;
+
+        rootCache[key] = nullptr;
+
+        Value resolved = traceToLocalRoot(v);
+        Operation *result = nullptr;
+
+        if (auto blockArg = mlir::dyn_cast<BlockArgument>(resolved)) {
+            cir::FuncOp funcOp = findEnclosingFunc(blockArg.getOwner());
+            if (funcOp && llvm::is_contained(funcOp.getArguments(), blockArg)) {
+                for (ThreadInstance inst : getThreadInstances(funcOp)) {
+                    if (inst.threadId == threadId && inst.boundArg) {
+                        result = resolveQueueRoot(inst.boundArg, threadId);
+                        break;
+                    }
+                }
+            }
+        } else {
+            result = resolved.getDefiningOp();
+
+            if (auto getGlobalOp = mlir::dyn_cast_or_null<cir::GetGlobalOp>(result)) {
+                if (auto nameAttr = getGlobalOp->getAttrOfType<FlatSymbolRefAttr>("name")) {
+                    if (auto globalOp = SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
+                            getGlobalOp.getOperation(), nameAttr))
+                        result = globalOp.getOperation();
+                }
+            }
+        }
+
+        rootCache[key] = result;
+        return result;
+    }
+
+    void recordQueueAccess(Operation *op, Value queueValue, bool isPush) {
+        auto caller = op->getParentOfType<cir::FuncOp>();
+
+        llvm::SmallVector<ThreadInstance> instances = getThreadInstances(caller);
+        if (instances.empty()) {
+            llvm::outs()
+                << "Could not resolve thread context for "
+                << caller.getSymName()
+                << "\n";
+            return;
+        }
+
+        for (ThreadInstance &inst : instances) {
+            Operation *root = resolveQueueRoot(queueValue, inst.threadId);
+            if (!root) {
+                llvm::outs()
+                    << "Could not resolve queue instance for T"
+                    << inst.threadId
+                    << "\n";
+                continue;
+            }
+
+            QueueAccessInfo &info = queueAccesses[root];
+            if (isPush) {
+                info.producers.insert(inst.threadId);
+            } else {
+                info.consumers.insert(inst.threadId);
             }
 
             llvm::outs()
                 << (isPush ? "QUEUE PUSH" : "QUEUE POP")
                 << "\n  caller: "
                 << caller.getSymName()
-                << "\n  queue: @"
-                << nameAttr.getValue()
+                << "\n  thread: T"
+                << inst.threadId
                 << "\n";
-        });
+        }
+    }
+
+    static void printQueueLabel(Operation *root) {
+        if (auto globalOp = mlir::dyn_cast<cir::GlobalOp>(root)) {
+            llvm::outs() << "@" << globalOp.getSymName();
+            return;
+        }
+        llvm::outs() << root->getLoc();
     }
 
     void classifyQueues() {
-        for (auto& entry : queueAccesses) {
-            StringRef queueName = entry.getKey();
-            QueueAccessInfo &info = entry.getValue();
-
+        for (auto& [root, info] : queueAccesses) {
             size_t producerCount = info.producers.size();
             size_t consumerCount = info.consumers.size();
 
+            llvm::outs() << "Queue ";
+            printQueueLabel(root);
             llvm::outs()
-                << "Queue @" << queueName << "\n"
-                << "  producers: " << producerCount << "\n"
+                << "\n  producers: " << producerCount << "\n"
                 << "  consumers: " << consumerCount << "\n";
-            
+
             if (producerCount == 1 &&
                 consumerCount == 1) {
                 llvm::outs() << "  classification: SPSC\n";
