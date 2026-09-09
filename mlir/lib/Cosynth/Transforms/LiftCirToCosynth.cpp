@@ -124,10 +124,17 @@ struct LiftQueueCallPattern : public OpConversionPattern<cir::CallOp> {
             rewriter, op.getLoc(), queueType, adaptor.getOperands()[0]
         ).getResult(0);
 
+        auto fallbackImplAttr = FlatSymbolRefAttr::get(
+            rewriter.getContext(),
+            op.getCalleeAttr().getRootReference().getValue()
+        );
+
+        auto sourceQueueTypeAttr = TypeAttr::get(op.getOperand(0).getType());
+
         if (isPush) {
-            rewriter.replaceOpWithNewOp<QueuePushOp>(op, queue, adaptor.getOperands()[1], IntegerAttr());
+            rewriter.replaceOpWithNewOp<QueuePushOp>(op, queue, adaptor.getOperands()[1], IntegerAttr(), fallbackImplAttr, sourceQueueTypeAttr);
         } else {
-            rewriter.replaceOpWithNewOp<QueuePopOp>(op, op.getResult().getType(), queue, IntegerAttr());
+            rewriter.replaceOpWithNewOp<QueuePopOp>(op, op.getResult().getType(), queue, IntegerAttr(), fallbackImplAttr, sourceQueueTypeAttr);
         }
 
         return success();

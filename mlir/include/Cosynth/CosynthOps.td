@@ -25,15 +25,19 @@ def UnlockOp : Cosynth_Op<"unlock"> {
 def QueuePushOp : Cosynth_Op<"queue_push", []> {
     let summary = "A queue push operation";
     let arguments = (ins Cosynth_QueueType:$queue, AnyType:$value,
-        OptionalAttr<I64Attr>:$queue_id);
+        OptionalAttr<I64Attr>:$queue_id,
+        OptionalAttr<FlatSymbolRefAttr>:$fallback_impl,
+        OptionalAttr<TypeAttr>:$source_queue_type);
     let results = (outs);
 }
 
 def QueuePopOp : Cosynth_Op<"queue_pop", []> {
     let summary = "A non-blocking queue pop operation, mirroring shared_ptr<T> semantics: a null result means empty";
     let arguments = (ins Cosynth_QueueType:$queue,
-        OptionalAttr<I64Attr>:$queue_id);
-    let results = (outs AnyType:$value); // single result — no separate success flag
+        OptionalAttr<I64Attr>:$queue_id,
+        OptionalAttr<FlatSymbolRefAttr>:$fallback_impl,
+        OptionalAttr<TypeAttr>:$source_queue_type);
+    let results = (outs AnyType:$value);
 }
 
 #endif // COSYNTH_OPS_TD

@@ -72,7 +72,63 @@ struct LowerMutexUnlockPattern : public OpConversionPattern<UnlockOp> {
     }
 };
 
-struct LowerCosynthToCIRPass 
+struct LowerQueuePushPattern : public OpConversionPattern<QueuePushOp> {
+    using OpConversionPattern::OpConversionPattern;
+
+    LogicalResult matchAndRewrite(
+        QueuePushOp op,
+        OpAdaptor adaptor,
+        ConversionPatternRewriter &rewriter
+    ) const override {
+        auto calleeAttr = op.getFallbackImplAttr();
+        auto sourceQueueType = op.getSourceQueueTypeAttr().getValue();
+
+        Value queueAsCir = rewriter.create<mlir::UnrealizedConversionCastOp>(
+            op.getLoc(),
+            sourceQueueType,
+            adaptor.getQueue()
+        ).getResult(0);
+
+        rewriter.replaceOpWithNewOp<cir::CallOp>(
+            op,
+            calleeAttr,
+            /*returnType=*/Type{},
+            ValueRange{queueAsCir, adaptor.getValue()}
+        );
+
+        return success();
+    }
+};
+
+struct LowerQueuePopPattern : public OpConversionPattern<QueuePopOp> {
+    using OpConversionPattern::OpConversionPattern;
+
+    LogicalResult matchAndRewrite(
+        QueuePopOp op,
+        OpAdaptor adaptor,
+        ConversionPatternRewriter &rewriter
+    ) const override {
+        auto calleeAttr = op.getFallbackImplAttr();
+        auto sourceQueueType = op.getSourceQueueTypeAttr().getValue();
+
+        Value queueAsCir = rewriter.create<mlir::UnrealizedConversionCastOp>(
+            op.getLoc(),
+            sourceQueueType,
+            adaptor.getQueue()
+        ).getResult(0);
+
+        rewriter.replaceOpWithNewOp<cir::CallOp>(
+            op,
+            calleeAttr,
+            /*returnType=*/op.getResult().getType(),
+            ValueRange{queueAsCir}
+        );
+
+        return success();
+    }
+};
+
+struct LowerCosynthToCIRPass
     : public PassWrapper<LowerCosynthToCIRPass, OperationPass<ModuleOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerCosynthToCIRPass)
     
@@ -94,6 +150,8 @@ struct LowerCosynthToCIRPass
         RewritePatternSet patterns(context);
         patterns.add<LowerMutexLockPattern>(context);
         patterns.add<LowerMutexUnlockPattern>(context);
+        patterns.add<LowerQueuePushPattern>(context);
+        patterns.add<LowerQueuePopPattern>(context);
 
         if (failed(applyPartialConversion(getOperation(), conversionTarget, std::move(patterns)))) {
             signalPassFailure();
