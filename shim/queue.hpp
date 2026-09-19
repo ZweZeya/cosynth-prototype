@@ -40,12 +40,10 @@ public:
     queue(const queue&) = delete;
     queue& operator=(const queue&) = delete;
 
-    queue(queue&&) = operator delete;
+    queue(queue&&) = delete;
     queue& operator=(queue&&) = delete;
 
-    ~queue() {
-        
-    }
+    ~queue() {}
 
     [[clang::annotate("cosynth_queue_try_pop")]]
     std::shared_ptr<T> try_pop() {

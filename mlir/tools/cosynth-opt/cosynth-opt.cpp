@@ -20,6 +20,7 @@ int main(int argc, char **argv) {
   mlir::cosynth::registerLiftCIRToCosynthPass();
   mlir::cosynth::registerLowerCosynthToCIRPass();
   mlir::cosynth::registerQueueOwnershipAnalysisPass();
+  mlir::cosynth::registerSelectQueueImplementationPass();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CoSynth optimizer driver\n", registry));

@@ -89,12 +89,25 @@ struct LowerQueuePushPattern : public OpConversionPattern<QueuePushOp> {
             adaptor.getQueue()
         ).getResult(0);
 
-        rewriter.replaceOpWithNewOp<cir::CallOp>(
-            op,
+        // The original concur::queue<T>::push returns void, but a
+        // substituted implementation (e.g. spsc_queue<T,N>::push) may not
+        // -- look up the actual callee's declared return type rather than
+        // assuming void, since nothing here reads a push result either way.
+        auto calleeFunc = SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(op, calleeAttr);
+        Type returnType = calleeFunc ? calleeFunc.getFunctionType().getReturnType() : Type{};
+
+        // QueuePushOp always has zero results (nothing has ever consumed
+        // push's return value, void or otherwise), but the new call may
+        // have one now -- replaceOpWithNewOp requires matching result
+        // counts 1:1, so insert the call and drop the old op separately
+        // instead of trying to "replace" a 0-result op with a 1-result one.
+        rewriter.create<cir::CallOp>(
+            op.getLoc(),
             calleeAttr,
-            /*returnType=*/Type{},
+            returnType,
             ValueRange{queueAsCir, adaptor.getValue()}
         );
+        rewriter.eraseOp(op);
 
         return success();
     }

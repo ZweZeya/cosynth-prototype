@@ -6,6 +6,7 @@ namespace mlir::cosynth {
     void registerLiftCIRToCosynthPass();
     void registerLowerCosynthToCIRPass();
     void registerQueueOwnershipAnalysisPass();
+    void registerSelectQueueImplementationPass();
     void analyseQueues(ModuleOp module);
 }
 
